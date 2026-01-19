@@ -38,15 +38,6 @@ const validateLocation = (location) => {
   return false;
 };
 
-// Error handling middleware
-app.use((err, req, res, next) => {
-  console.error('Error:', err);
-  res.status(err.status || 500).json({
-    message: err.message || 'Internal server error',
-    ...(process.env.NODE_ENV === 'development' && { stack: err.stack })
-  });
-});
-
 // Health check endpoint
 app.get('/api/health', (req, res) => {
   res.json({ status: 'ok', timestamp: new Date().toISOString() });
@@ -80,20 +71,28 @@ app.post('/api/users/signup', async (req, res, next) => {
       });
     }
 
-    // Check if user already exists
-    const existingUser = users.find(u => u.email.toLowerCase() === email.toLowerCase());
+    // Check if user already exists (first check - early exit)
+    const normalizedEmail = email.toLowerCase();
+    let existingUser = users.find(u => u.email === normalizedEmail);
     if (existingUser) {
       return res.status(409).json({ message: 'User with this email already exists' });
     }
 
-    // Hash password
+    // Hash password (async operation)
     const saltRounds = 10;
     const hashedPassword = await bcrypt.hash(password, saltRounds);
 
-    // Store user
+    // Double-check for race condition: verify uniqueness again after async operation
+    // This prevents concurrent requests from creating duplicate users
+    existingUser = users.find(u => u.email === normalizedEmail);
+    if (existingUser) {
+      return res.status(409).json({ message: 'User with this email already exists' });
+    }
+
+    // Store user (atomically add to array)
     const newUser = {
       id: users.length + 1,
-      email: email.toLowerCase(),
+      email: normalizedEmail,
       password: hashedPassword,
       location: location,
       createdAt: new Date().toISOString()
@@ -217,6 +216,15 @@ function authenticateToken(req, res, next) {
 // 404 handler
 app.use((req, res) => {
   res.status(404).json({ message: 'Route not found' });
+});
+
+// Error handling middleware (MUST be last, after all routes)
+app.use((err, req, res, next) => {
+  console.error('Error:', err);
+  res.status(err.status || 500).json({
+    message: err.message || 'Internal server error',
+    ...(process.env.NODE_ENV === 'development' && { stack: err.stack })
+  });
 });
 
 // Start server
